@@ -1,0 +1,537 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1" ProductVersion="3.1.4020.12">
+  <POU Name="MAIN" Id="{a546c014-ca17-4895-adf6-7f1646fc96ea}" SpecialFunc="None">
+    <Declaration><![CDATA[PROGRAM MAIN
+VAR
+	iStep           :INT;
+	timer1          :TON;
+	referVelo       :DINT;
+	sampleVelo      :DINT;//采样速度
+	modAngle        :DINT;
+	actAngle        :LREAL;
+	rotation        :BOOL;//旋转方向
+	rotationSingle  :INT;//旋转标志位
+	runDirect       :INT;
+	needChange      :BOOL;
+	(*--- CSP ---*)
+	axis1: AXIS_REF;
+	power_do : BOOL;
+	tarPosition : LREAL;
+	oriPos      : DINT;//原始位置保存
+	posSum      : DINT;
+	posCount    :INT;
+	ifPosModifyFinish : BOOL;
+	tarVelocity : LREAL := 0;
+	tarAcc      : LREAL := 50000;
+	enable : BOOL:=TRUE;
+	ifDone      :BOOL;
+	ifGetTarPos :BOOL :=TRUE;
+	K           :LREAL := 0.3;
+	B           :LREAL := 0.5;
+	BGain       :LREAL := 1;
+	Bactual    	:LREAL;
+	M           :LREAL := 0.5;
+	iGain       :LREAL := 0.001;
+	iLimit      :LREAL := 50000;
+	veloLimit   :LREAL := 500;
+	dualGain    :LREAL := 0.3;
+	irDualPosFix   :LREAL;
+	dualPosDiffPreFix :DINT;
+	tarVelo :DINT := 0;
+	posiDiff    :LREAL;
+	sumPosDiff  :LREAL := 0;
+	gainAcc : LREAL := 15;
+	ifAction :BOOL := FALSE;
+	(*--- For kalman filter ---*)
+	filter1: KalmanFilter;
+	filter2: KalmanFilter;
+	irDualPos     : LREAL;//滤波后双编码器差值
+	irActVelo: LREAL;
+	(*--- Limit ---*)
+	speedLimit: DINT   := 350;
+	accMax:   UDINT  := 3000;
+	accMin:   UDINT  := 200;
+	(*--- Gain ---*)
+	accGain   :LREAL   :=3;
+	speedGain :DINT    :=50;
+	dampGain  :LREAL   :=1.5;
+	(*--- DeadZone ---*)
+	deadZone       :LREAL   :=200;//驱动变速死区
+	startDeadZone  :LREAL   :=150;//启动死区
+	deadSpeedZone  :DINT    :=50;//速度归零死区
+	(*--- Offset ---*)
+	lowSpeedOffsetA   :LREAL :=872.783;//正低速偏置
+	lowSpeedOffsetB   :LREAL :=860.311;//负低速偏置
+	highSpeedOffsetA :LREAL :=772.06430;//正高速偏置
+	highSpeedOffsetB :LREAL :=751.81464;//负高速偏置
+	(*--- Offset Auto Modify---*)
+	i                 : INT;
+	offsetList        :ARRAY [0..99] OF LREAL;
+	zeroCount         :INT   := 0;
+	offsetSum         :LREAL := 0;
+	offsetMean        :LREAL := 0;
+	ifModifyFinish    :BOOL  := FALSE;
+
+END_VAR
+]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[timer1(IN:= , PT:= T#0.5S, Q=> , ET=> );
+CASE iStep OF
+	0:
+		GVL.uiCtrl:=6;//0x0006
+		oriPos := GVL.actPosition;
+		tarPosition := oriPos;
+	1:
+		GVL.udiProAcc:=1000;
+		GVL.udiProDec:=1000;
+		iStep:=2;
+		timer1.IN:=TRUE;
+	2:
+		GVL.siOperationMode:=3;
+		IF GVL.siOperationMode=3 THEN
+			iStep:=10;//跳入使能
+		END_IF
+	10:	//使能
+		//6
+		IF GVL.uiCtrl = 0 THEN
+			GVL.uiCtrl:=6;//0x002F
+		END_IF
+		IF timer1.Q THEN
+			IF GVL.uiCtrl = 6 THEN
+				GVL.uiCtrl:=47;//0x002F
+				iStep:=15;//跳入运行
+			END_IF
+			timer1.IN:=FALSE;
+		END_IF
+	11://零力运行
+		IF (GVL.actVelo > 45000) THEN
+			GVL.dualPosFix:=GVL.DualPosDiff - (LREAL_TO_DINT(-(DINT_TO_LREAL(GVL.actVelo)*DINT_TO_LREAL(GVL.actVelo)*0.0000003816)+DINT_TO_LREAL(GVL.actVelo)*0.08359+highSpeedOffsetA));
+		ELSIF (GVL.actVelo < -45000) THEN
+			GVL.dualPosFix:=GVL.DualPosDiff - (LREAL_TO_DINT((DINT_TO_LREAL(GVL.actVelo)*DINT_TO_LREAL(GVL.actVelo)*0.0000003500)+DINT_TO_LREAL(GVL.actVelo)*0.07837+highSpeedOffsetB));
+		ELSE
+			GVL.dualPosFix:=GVL.DualPosDiff - (LREAL_TO_DINT(DINT_TO_LREAL(GVL.actVelo)*0.0624 + lowSpeedOffsetA));
+		END_IF
+		filter1(NewData:= GVL.dualPosFix, Q_cov:=, R_cov:= , OutData=> );
+		irDualPos:=filter1.OutData;
+		sampleVelo := GVL.actVelo/257;//重新标定参考速度
+		
+		(*--- 重新设置静态偏置---*)
+		IF (ABS(sampleVelo)) < 5 AND ifModifyFinish = FALSE THEN
+			offsetList[zeroCount] := irDualPos;
+			zeroCount:=zeroCount + 1;
+		ELSE
+			zeroCount:=0;
+		END_IF
+		IF zeroCount >= 100 THEN
+			offsetSum := 0;
+			FOR i := 0 TO 99 BY +1 DO
+				offsetSum := offsetSum + offsetList[i];
+				offsetList[i] := 0;
+			END_FOR;
+			offsetMean := offsetSum / 100;
+			zeroCount := 0;
+			lowSpeedOffsetA := lowSpeedOffsetA + offsetMean;
+			offsetSum := 0;
+			ifModifyFinish:=TRUE;
+		END_IF
+		(*--- 完成设置静态偏置---*)
+		IF runDirect = 0 AND ifModifyFinish = TRUE THEN//处于零位置稳态
+			IF (irDualPos - startDeadZone) > 0 THEN
+				runDirect := -1;
+				ifModifyFinish := FALSE;
+			ELSIF (irDualPos + startDeadZone) < 0  THEN
+				runDirect := 1;
+				ifModifyFinish := FALSE;
+			END_IF
+		ELSIF (irDualPos - deadZone) > 0 THEN
+			runDirect := -1;
+		ELSIF (irDualPos + deadZone) < 0 THEN
+			runDirect := 1;
+		ELSIF ABS(irDualPos) <100 THEN//当从动态进入稳态时
+			runDirect := 0;
+		END_IF
+		(*--- 加速度和速度设定---*)
+		IF runDirect <> 0 THEN
+			GVL.udiProAcc:=LREAL_TO_UDINT(ABS(irDualPos)*accGain);
+			GVL.udiProDec:=LREAL_TO_UDINT(ABS(irDualPos)*accGain);
+			GVL.targetVelo:=sampleVelo+speedGain*runDirect;
+		ELSE
+			GVL.udiProAcc:=LREAL_TO_UDINT(DINT_TO_LREAL(ABS(sampleVelo))*dampGain);
+			GVL.udiProDec:=LREAL_TO_UDINT(DINT_TO_LREAL(ABS(sampleVelo))*dampGain);
+			GVL.targetVelo:=0;
+		END_IF
+		
+		(*--- 限幅 ---*)
+		IF GVL.targetVelo>speedLimit THEN
+			GVL.targetVelo:=speedLimit;
+		ELSIF GVL.targetVelo<-speedLimit THEN
+			GVL.targetVelo:=-speedLimit;
+		END_IF
+		IF GVL.udiProAcc>accMax THEN
+			GVL.udiProAcc:=accMax;
+		END_IF
+		IF GVL.udiProDec>accMax THEN
+			GVL.udiProDec:=accMax;
+		END_IF
+		IF GVL.udiProAcc<accMin THEN
+			GVL.udiProAcc:=accMin;
+		END_IF
+		IF GVL.udiProDec<accMin THEN
+			GVL.udiProDec:=accMin;
+		END_IF
+	12://按角度变速正向运行
+		//计算当前角度
+		modAngle:= ABS(GVL.actPosition MOD 524288);
+		actAngle:= (DINT_TO_LREAL(modAngle)/524288)*360;
+		//控制关节变速运动
+		GVL.targetVelo:=(ABS(LREAL_TO_DINT((actAngle-180)*1.5)))+30;
+	13://按角度变速反向运行
+		//计算当前角度
+		modAngle:= ABS(GVL.actPosition MOD 524288);
+		actAngle:= (DINT_TO_LREAL(modAngle)/524288)*360;
+		//控制关节变速运动
+		GVL.targetVelo:=-(ABS(LREAL_TO_DINT((actAngle-180)*1.5)))-30;
+	14://按角度变速正反向运行
+		//计算当前角度
+		modAngle:= ABS(GVL.actPosition MOD 524288);
+		actAngle:= (DINT_TO_LREAL(modAngle)/524288)*360;
+		IF rotation = 0 THEN
+			IF actAngle < 180 THEN
+				IF rotationSingle = 2 THEN//切换模式
+					rotation := 1;
+					rotationSingle := 3;
+					GVL.targetVelo:=0;
+				ELSE
+					IF actAngle <= 5 THEN
+						rotationSingle := 1;
+					END_IF
+					GVL.targetVelo:=(ABS(LREAL_TO_DINT(actAngle*1.5)))+30;
+				END_IF	
+			ELSIF actAngle >= 180 THEN
+				IF actAngle >= 355 AND rotationSingle = 1 THEN
+					rotationSingle := 2;
+				END_IF
+				GVL.targetVelo:=(ABS(LREAL_TO_DINT((360-actAngle)*1.5)))+30;
+			END_IF
+		ELSE 
+			IF actAngle < 180 THEN
+				IF actAngle <= 5 AND rotationSingle = 4 THEN
+					rotationSingle := 5;
+				END_IF
+				GVL.targetVelo:=-(ABS(LREAL_TO_DINT(actAngle*1.5)))-30;
+			ELSIF actAngle >= 180 THEN
+				IF rotationSingle = 5 THEN//切换模式
+					rotation := 0;
+					rotationSingle := 0;
+					GVL.targetVelo:=0;
+				ELSE
+					IF actAngle >= 355 THEN
+						rotationSingle := 4;
+					END_IF
+					GVL.targetVelo:=-(ABS(LREAL_TO_DINT((360-actAngle)*1.5)))-30;
+				END_IF	
+			END_IF
+		END_IF
+		//控制关节变速运动
+		//GVL.targetVelo:=(ABS(LREAL_TO_DINT((actAngle-180)*1.5)))+30;
+	15://二阶阻抗系统模拟
+		(*--- 双编码器差值插补---*)
+		IF GVL.actVelo > 45000 THEN
+			GVL.dualPosFix:=GVL.DualPosDiff - (LREAL_TO_DINT(-(DINT_TO_LREAL(GVL.actVelo)*DINT_TO_LREAL(GVL.actVelo)*0.0000003665)+DINT_TO_LREAL(GVL.actVelo)*0.08170+highSpeedOffsetA));
+		ELSIF GVL.actVelo < -45000 THEN
+			GVL.dualPosFix:=GVL.DualPosDiff - (LREAL_TO_DINT((DINT_TO_LREAL(GVL.actVelo)*DINT_TO_LREAL(GVL.actVelo)*0.0000003247)+DINT_TO_LREAL(GVL.actVelo)*0.07503+highSpeedOffsetB));
+		ELSIF GVL.actVelo > 0 THEN
+			GVL.dualPosFix:=GVL.DualPosDiff - (LREAL_TO_DINT(DINT_TO_LREAL(GVL.actVelo)*0.06254 + lowSpeedOffsetA));
+		ELSE
+			GVL.dualPosFix:=GVL.DualPosDiff - (LREAL_TO_DINT(DINT_TO_LREAL(GVL.actVelo)*0.06284 + lowSpeedOffsetB));
+		END_IF
+		filter1(NewData:= GVL.dualPosFix, Q_cov:=, R_cov:= , OutData=> );
+		irDualPos:=filter1.OutData;
+		
+		(*--- 重新设置静态偏置---*)
+		IF (ABS(GVL.actVelo)) < 200 AND ifModifyFinish = FALSE THEN
+			offsetList[zeroCount] := irDualPos;
+			zeroCount:=zeroCount + 1;
+		ELSE
+			zeroCount:=0;
+		END_IF
+		IF zeroCount >= 100 THEN
+			offsetSum := 0;
+			FOR i := 0 TO 99 BY +1 DO
+				offsetSum := offsetSum + offsetList[i];
+				offsetList[i] := 0;
+			END_FOR;
+			offsetMean := offsetSum / 100;
+			zeroCount := 0;
+			lowSpeedOffsetA := lowSpeedOffsetA + offsetMean;
+			lowSpeedOffsetB := lowSpeedOffsetB + offsetMean;
+			offsetSum := 0;
+			ifModifyFinish:=TRUE;
+		END_IF
+		
+		(*--- 开始方向解算---*)
+		IF runDirect = 0 AND ifModifyFinish = TRUE THEN//处于零位置稳态
+			IF (irDualPos - startDeadZone) > 0 THEN
+				runDirect := -1;
+				ifAction := TRUE;
+				ifModifyFinish := FALSE;
+			ELSIF (irDualPos + startDeadZone) < 0  THEN
+				runDirect := 1;
+				ifAction := TRUE;
+				ifModifyFinish := FALSE;
+			END_IF
+		ELSIF (irDualPos - deadZone) > 0 THEN
+			runDirect := -1;
+			ifAction := TRUE;
+		ELSIF (irDualPos + deadZone) < 0 THEN
+			runDirect := 1;
+			ifAction := TRUE;
+		ELSIF ABS(irDualPos) <100 THEN//当从动态进入稳态时
+			runDirect := 0;
+		END_IF
+		
+		(*--- 开始导纳控制解算---*)
+		sampleVelo := GVL.actVelo/257;
+		IF runDirect = 0 THEN//调整阻尼曲线
+			Bactual := B + BGain * EXP(-ABS(oriPos - GVL.actPosition)/257);
+		ELSE
+			Bactual := B;
+		END_IF
+		//添加积分项并限幅
+		posiDiff := (oriPos - DINT_TO_LREAL(GVL.actPosition))/257;
+		sumPosDiff := sumPosDiff + posiDiff;
+		IF sumPosDiff < -iLimit THEN
+			sumPosDiff := -iLimit;
+		ELSIF sumPosDiff > iLimit THEN
+			sumPosDiff := iLimit;
+		END_IF
+		//调整外力曲线
+		IF irDualPos < 500 AND irDualPos >= 0 THEN
+			irDualPosFix := irDualPos * irDualPos /500;
+		ELSIF irDualPos >= -500 AND irDualPos < 0 THEN
+			irDualPosFix := -irDualPos * irDualPos /500;
+		END_IF
+		(*--- 运动状态判断---*)
+		IF ifAction = TRUE AND runDirect = 0 AND ABS(sampleVelo) < 20 AND ABS(posiDiff) < 10 THEN
+			ifAction := FALSE;
+		END_IF
+		(*--- 导纳控制---*)
+		IF ifAction = TRUE THEN
+			tarAcc := (-irDualPosFix * dualGain + iGain * sumPosDiff + K * posiDiff + Bactual*DINT_TO_LREAL(tarVelo - sampleVelo))/M;
+			tarVelocity := tarVelocity + tarAcc * 0.01;
+		ELSE//重置位置信息，去零漂
+			tarAcc := 500;
+			tarVelocity := 0;
+			IF sampleVelo = 0 AND ifPosModifyFinish = FALSE THEN
+				posCount := posCount + 1;
+				posSum := posSum + GVL.actPosition;
+				IF posCount = 100 THEN
+					oriPos := posSum / 100;
+					ifPosModifyFinish := TRUE;
+				END_IF
+			ELSE
+				posCount := 0;
+				posSum := 0;
+			END_IF 
+		END_IF
+		
+		IF tarVelocity > veloLimit THEN
+			tarVelocity := veloLimit;
+		ELSIF tarVelocity <= -veloLimit THEN
+			tarVelocity := -veloLimit;
+		END_IF
+		
+		tarAcc := tarAcc * gainAcc;
+		(*--- 限幅 ---*)
+		IF tarAcc>accMax THEN
+			tarAcc:=accMax;
+		ELSIF  tarAcc<=-LREAL_TO_DINT(accMax) THEN
+			tarAcc:=-LREAL_TO_DINT(accMax);
+		END_IF
+		GVL.udiProAcc := LREAL_TO_UDINT(ABS(tarAcc));
+		GVL.udiProDec := LREAL_TO_UDINT(ABS(tarAcc));
+		
+		(*--- 限幅 ---*)
+		GVL.targetVelo := LREAL_TO_DINT(tarVelocity);
+		IF GVL.targetVelo>speedLimit THEN
+			GVL.targetVelo:=speedLimit;
+		ELSIF GVL.targetVelo<-speedLimit THEN
+			GVL.targetVelo:=-speedLimit;
+		END_IF
+	1000:
+		GVL.targetVelo:=0;
+		IF (ABS(gvl.actVelo)<1000) AND timer1.IN=FALSE THEN
+			timer1.IN:=TRUE;
+		END_IF
+		IF timer1.Q THEN
+			timer1.IN:=FALSE;
+			iStep:=0;//停滞档
+		END_IF
+END_CASE]]></ST>
+    </Implementation>
+    <LineIds Name="MAIN">
+      <LineId Id="37" Count="0" />
+      <LineId Id="63" Count="1" />
+      <LineId Id="731" Count="0" />
+      <LineId Id="1038" Count="0" />
+      <LineId Id="6" Count="0" />
+      <LineId Id="25" Count="0" />
+      <LineId Id="28" Count="0" />
+      <LineId Id="27" Count="0" />
+      <LineId Id="51" Count="0" />
+      <LineId Id="26" Count="0" />
+      <LineId Id="9" Count="8" />
+      <LineId Id="46" Count="0" />
+      <LineId Id="49" Count="0" />
+      <LineId Id="52" Count="2" />
+      <LineId Id="56" Count="0" />
+      <LineId Id="50" Count="0" />
+      <LineId Id="23" Count="0" />
+      <LineId Id="253" Count="0" />
+      <LineId Id="288" Count="0" />
+      <LineId Id="254" Count="0" />
+      <LineId Id="289" Count="0" />
+      <LineId Id="256" Count="1" />
+      <LineId Id="367" Count="0" />
+      <LineId Id="95" Count="0" />
+      <LineId Id="105" Count="0" />
+      <LineId Id="192" Count="0" />
+      <LineId Id="429" Count="0" />
+      <LineId Id="308" Count="0" />
+      <LineId Id="302" Count="0" />
+      <LineId Id="307" Count="0" />
+      <LineId Id="303" Count="0" />
+      <LineId Id="309" Count="1" />
+      <LineId Id="304" Count="0" />
+      <LineId Id="311" Count="0" />
+      <LineId Id="359" Count="0" />
+      <LineId Id="313" Count="0" />
+      <LineId Id="315" Count="0" />
+      <LineId Id="318" Count="0" />
+      <LineId Id="316" Count="0" />
+      <LineId Id="360" Count="0" />
+      <LineId Id="319" Count="1" />
+      <LineId Id="358" Count="0" />
+      <LineId Id="431" Count="0" />
+      <LineId Id="314" Count="0" />
+      <LineId Id="322" Count="0" />
+      <LineId Id="366" Count="0" />
+      <LineId Id="432" Count="0" />
+      <LineId Id="442" Count="0" />
+      <LineId Id="449" Count="0" />
+      <LineId Id="445" Count="1" />
+      <LineId Id="450" Count="0" />
+      <LineId Id="443" Count="0" />
+      <LineId Id="451" Count="5" />
+      <LineId Id="433" Count="0" />
+      <LineId Id="409" Count="0" />
+      <LineId Id="405" Count="1" />
+      <LineId Id="408" Count="0" />
+      <LineId Id="414" Count="1" />
+      <LineId Id="417" Count="1" />
+      <LineId Id="416" Count="0" />
+      <LineId Id="407" Count="0" />
+      <LineId Id="634" Count="0" />
+      <LineId Id="364" Count="0" />
+      <LineId Id="146" Count="1" />
+      <LineId Id="149" Count="1" />
+      <LineId Id="148" Count="0" />
+      <LineId Id="166" Count="1" />
+      <LineId Id="170" Count="2" />
+      <LineId Id="175" Count="0" />
+      <LineId Id="420" Count="5" />
+      <LineId Id="248" Count="3" />
+      <LineId Id="371" Count="0" />
+      <LineId Id="252" Count="0" />
+      <LineId Id="161" Count="0" />
+      <LineId Id="370" Count="0" />
+      <LineId Id="372" Count="3" />
+      <LineId Id="496" Count="4" />
+      <LineId Id="502" Count="0" />
+      <LineId Id="516" Count="1" />
+      <LineId Id="519" Count="6" />
+      <LineId Id="518" Count="0" />
+      <LineId Id="506" Count="0" />
+      <LineId Id="512" Count="2" />
+      <LineId Id="507" Count="0" />
+      <LineId Id="505" Count="0" />
+      <LineId Id="526" Count="1" />
+      <LineId Id="547" Count="0" />
+      <LineId Id="591" Count="2" />
+      <LineId Id="557" Count="0" />
+      <LineId Id="577" Count="9" />
+      <LineId Id="562" Count="0" />
+      <LineId Id="503" Count="0" />
+      <LineId Id="563" Count="1" />
+      <LineId Id="652" Count="0" />
+      <LineId Id="677" Count="5" />
+      <LineId Id="1249" Count="1" />
+      <LineId Id="683" Count="2" />
+      <LineId Id="687" Count="16" />
+      <LineId Id="1251" Count="0" />
+      <LineId Id="704" Count="2" />
+      <LineId Id="1079" Count="0" />
+      <LineId Id="708" Count="0" />
+      <LineId Id="962" Count="2" />
+      <LineId Id="1148" Count="0" />
+      <LineId Id="965" Count="2" />
+      <LineId Id="1149" Count="0" />
+      <LineId Id="968" Count="3" />
+      <LineId Id="1161" Count="0" />
+      <LineId Id="972" Count="1" />
+      <LineId Id="1162" Count="0" />
+      <LineId Id="974" Count="2" />
+      <LineId Id="1086" Count="0" />
+      <LineId Id="1078" Count="0" />
+      <LineId Id="1124" Count="0" />
+      <LineId Id="1114" Count="1" />
+      <LineId Id="1117" Count="1" />
+      <LineId Id="1116" Count="0" />
+      <LineId Id="1112" Count="0" />
+      <LineId Id="1122" Count="0" />
+      <LineId Id="1125" Count="0" />
+      <LineId Id="1127" Count="0" />
+      <LineId Id="1129" Count="1" />
+      <LineId Id="1128" Count="0" />
+      <LineId Id="1131" Count="0" />
+      <LineId Id="1134" Count="1" />
+      <LineId Id="1138" Count="0" />
+      <LineId Id="1133" Count="0" />
+      <LineId Id="1146" Count="0" />
+      <LineId Id="1150" Count="3" />
+      <LineId Id="1155" Count="2" />
+      <LineId Id="1160" Count="0" />
+      <LineId Id="1163" Count="0" />
+      <LineId Id="1168" Count="0" />
+      <LineId Id="1165" Count="0" />
+      <LineId Id="1169" Count="1" />
+      <LineId Id="1176" Count="0" />
+      <LineId Id="1171" Count="3" />
+      <LineId Id="1164" Count="0" />
+      <LineId Id="1154" Count="0" />
+      <LineId Id="1076" Count="0" />
+      <LineId Id="1139" Count="0" />
+      <LineId Id="1141" Count="0" />
+      <LineId Id="1143" Count="1" />
+      <LineId Id="1142" Count="0" />
+      <LineId Id="1119" Count="0" />
+      <LineId Id="1099" Count="0" />
+      <LineId Id="1105" Count="0" />
+      <LineId Id="1100" Count="4" />
+      <LineId Id="653" Count="0" />
+      <LineId Id="1068" Count="0" />
+      <LineId Id="1087" Count="1" />
+      <LineId Id="1107" Count="0" />
+      <LineId Id="1089" Count="4" />
+      <LineId Id="369" Count="0" />
+      <LineId Id="33" Count="1" />
+      <LineId Id="55" Count="0" />
+      <LineId Id="36" Count="0" />
+      <LineId Id="58" Count="0" />
+      <LineId Id="61" Count="1" />
+      <LineId Id="60" Count="0" />
+      <LineId Id="7" Count="0" />
+      <LineId Id="2" Count="0" />
+    </LineIds>
+  </POU>
+</TcPlcObject>

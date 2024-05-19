@@ -1,0 +1,43 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1" ProductVersion="3.1.4020.12">
+  <POU Name="KalmanFilter" Id="{763c175d-3aac-48bd-87db-ce7ad9f53403}" SpecialFunc="None">
+    <Declaration><![CDATA[FUNCTION_BLOCK KalmanFilter
+VAR_INPUT
+	NewData :LREAL;//预测值
+	Q_cov   :LREAL:=2;//系统协方差，越大越相信预测
+	R_cov   :LREAL:=100;//测量协方差，越大越相信旧测量值
+END_VAR
+VAR_OUTPUT
+	OutData :LREAL;//真实值
+END_VAR
+VAR
+	P_cov   :LREAL:=1;//k时刻先验协方差
+	P1_cov  :LREAL;//k时刻后验协方差
+	P2_cov  :LREAL;//k-1时刻后验协方差
+	K       :LREAL;//卡尔曼增益
+	Posterior:LREAL;//k时刻后验状态估计
+	Posterior1:LREAL;//k-1时刻后验状态估计
+	Priori    :LREAL;//k时刻先验状态估计
+	a         :LREAL;
+	b         :LREAL;
+END_VAR
+]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[Priori:=Posterior1;
+P_cov:=P2_cov+Q_cov;
+
+K:=P_cov/(P_cov+R_cov);
+Posterior:=Priori+K*(NewData-Priori);
+P1_cov:=(1-K)*P_cov;
+
+Posterior1:=Posterior;
+P2_cov:=P1_cov;
+
+OutData:=Posterior;]]></ST>
+    </Implementation>
+    <LineIds Name="KalmanFilter">
+      <LineId Id="21" Count="9" />
+      <LineId Id="9" Count="0" />
+    </LineIds>
+  </POU>
+</TcPlcObject>

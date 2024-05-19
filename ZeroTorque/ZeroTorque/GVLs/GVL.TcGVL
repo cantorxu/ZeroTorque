@@ -1,0 +1,30 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1" ProductVersion="3.1.4020.12">
+  <GVL Name="GVL" Id="{7c7b61cc-6b58-4663-a078-bed601700d1d}">
+    <Declaration><![CDATA[{attribute 'qualified_only'}
+VAR_GLOBAL
+	(*--- Triansmit PDO ---*)
+	DualPosDiff       AT%I*   :DINT;
+	ActTorque         AT%I*   :INT;
+	actVelo           AT%I*   :DINT;
+	loadPos           AT%I*   :DINT;
+	motorPos          AT%I*   :DINT;
+	actPosition       AT%I*   :DINT;
+	(*--- Receive PDO ---*)
+	targetTor         AT%Q*   :INT;
+	targetVelo        AT%Q*   :DINT;
+	targetPos         AT%Q*   :DINT;
+	uiCtrl            AT%Q*   :UINT;
+	siOperationMode   AT%Q*   :SINT;
+	udiProVelo        AT%Q*   :UDINT;
+	udiProAcc         AT%Q*   :UDINT;
+	udiProDec         AT%Q*   :UDINT;
+	(*--- Control word bit ---*)
+	arrCtrl           :ARRAY [0..15] OF BOOL;
+	(*--- Status word bit ---*)
+	arrStatus         :ARRAY [0..15] OF BOOL;
+	(* process data*)
+	dualPosFix         :DINT;
+END_VAR]]></Declaration>
+  </GVL>
+</TcPlcObject>

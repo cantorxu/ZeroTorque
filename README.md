@@ -84,19 +84,19 @@ TwinCAT Measurement Project1/2：参数测量辅助程序
 
 将阻尼系数B调为0后，关节受到外力会不断震荡，不会停止，随后添加阻尼使之停下
 
-![Untitled](.\pic\Untitled 1.png)
+![Untitled](.\pic\Untitled1.png)
 
 ## K = 0，B = 0.3，M = 0.5
 
 如下图所示，是关节在K调为0后的速度曲线，关节受到外力不会回归原位，而是速度趋于归0
 
-![Untitled](.\pic\Untitled 2.png)
+![Untitled](.\pic\Untitled2.png)
 
 ## K = 0，B = 0，M = 0.5
 
 如下图所示，是关节在K调为0和B调为0后的速度曲线，遵守牛顿第一定律，在不受外力作用时，呈现一个匀速运行的状态，受外力时会改变自身速度
 
-![Untitled](.\pic\Untitled 3.png)
+![Untitled](.\pic\Untitled3.png)
 
 # 后续开发
 
